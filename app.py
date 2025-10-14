@@ -6,7 +6,7 @@ import json
 import sqlite3
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 app.secret_key = '123456789' 
@@ -890,9 +890,79 @@ def recommend(user_id, filter_following):
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
 
-    recommended_posts = {} 
+    # 1. Get the content of all posts the user has liked (reacted to)
+    liked_posts_content = query_db('''
+            SELECT p.content FROM posts p
+            JOIN reactions r ON p.id = r.post_id
+            WHERE r.user_id = ? AND r.reaction_type NOT IN ('angry', 'sad')
+        ''', (user_id,))
 
-    return recommended_posts;
+    # If the user hasn't liked any posts return the 5 newest posts
+    if not liked_posts_content:
+        return query_db('''
+                SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+                FROM posts p JOIN users u ON p.user_id = u.id
+                WHERE p.user_id != ? ORDER BY p.created_at DESC LIMIT 5
+            ''', (user_id,))
+
+    # 2. Find the most common words from the posts they liked
+    word_counts = collections.Counter()
+    # A simple list of common words to ignore
+    stop_words = {'a', 'an', 'the', 'in', 'on', 'is', 'it', 'to', 'for', 'of', 'and', 'with'}
+
+    for post in liked_posts_content:
+        # Use regex to find all words in the post content
+        words = re.findall(r'\b\w+\b', post['content'].lower())
+        for word in words:
+            if word not in stop_words and len(word) > 2:
+                word_counts[word] += 1
+
+    top_keywords = [word for word, _ in word_counts.most_common(10)]
+
+    query = "SELECT p.id, p.content, p.created_at, u.username, u.id as user_id FROM posts p JOIN users u ON p.user_id = u.id"
+    params = []
+
+    # If filtering by following, add a WHERE clause to only include followed users.
+    if filter_following:
+        query += " WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
+        params.append(user_id)
+
+    all_other_posts = query_db(query, tuple(params))
+
+    recommended_posts = []
+    reacted_post_ids = {post['id'] for post in
+                      query_db('SELECT post_id as id FROM reactions WHERE user_id = ?', (user_id,))}
+
+    post_scores = {}
+    for post in all_other_posts:
+        if post['id'] in reacted_post_ids or post['user_id'] == user_id:
+            continue
+        # give score based on keyword matches
+        for keyword in top_keywords:
+            if keyword in post['content'].lower():
+                post_scores[post['id']] = post_scores.get(post['id'], 0) + 0.2
+
+        # if the post does not match any keywords, give a score 0
+        if post['id'] not in post_scores:
+            post_scores[post['id']] = 0
+
+        # if post is posted recently, add some score
+        if (datetime.now() - post['created_at']).days < 1:
+            post_scores[post['id']] += 0.5
+
+        #if post is cencored, give a score 0
+        moderated_content, _ = moderate_content(post['content'])
+        if moderated_content != post['content']:
+            post_scores[post['id']] = 0
+
+    post_scores = sorted(post_scores.items(), key=lambda x: x[1], reverse=True)
+    for post_id, _ in post_scores:
+        post = all_other_posts[[p['id'] for p in all_other_posts].index(post_id)]
+        recommended_posts.append(post)
+        if len(recommended_posts) >= 5:
+            break
+
+    return recommended_posts
 
 # Task 3.2
 def user_risk_analysis(user_id):
@@ -908,12 +978,76 @@ def user_risk_analysis(user_id):
             password: admin
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
-    
-    score = 0
 
-    return score;
+    profile_score = 0
+    post_score = 0
+    average_post_score = 0
+    comment_score = 0
+    average_comment_score = 0
+    # Rule 2.1: Post & Comment Risk Score
+    # Determine the author's account age in days.
+    author_created_dt = query_db('SELECT created_at FROM users WHERE id = ?', (user_id,), one=True)['created_at']
+    author_account_age_days = (datetime.now() - author_created_dt).days
 
-    
+    user_posts = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,))
+    for post in user_posts:
+        _, post_risk_score = moderate_content(post['content'])
+        if author_account_age_days < 7:
+            post_risk_score *= 1.5
+        post_score += post_risk_score
+
+    if post_score > 0:
+        average_post_score = post_score / len(user_posts)
+
+    user_comments = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,))
+    for comment in user_comments:
+        _, comment_risk_score = moderate_content(comment['content'])
+        if author_account_age_days < 7:
+            comment_risk_score *= 1.5
+        comment_score += comment_risk_score
+
+    if comment_score > 0:
+        average_comment_score = comment_score / len(user_comments)
+
+    user_bio = query_db('SELECT profile FROM users WHERE  id = ?', (user_id,), one=True)
+    if user_bio and user_bio['profile']:
+        _, bio_risk_score = moderate_content(user_bio['profile'])
+        profile_score += bio_risk_score
+
+
+    #Step 4 (Combine Scores)
+    content_risk_score = (profile_score * 1) + (average_post_score * 3) + (average_comment_score * 1)
+
+    #Step 5 (Apply Age Multiplier)
+    if author_account_age_days < 7:
+        content_risk_score *= 1.5
+    elif author_account_age_days < 30:
+        content_risk_score *= 1.2
+
+    # my control: rapid comment and post creation within a day.
+    # if user rapidly created content, we can assume they are a bot. So we can increase their risk score.
+    last_24_hours = datetime.now() - timedelta(hours=24)
+
+    recent_posts = query_db('SELECT created_at FROM posts WHERE user_id = ? AND created_at >= ?', (user_id, last_24_hours))
+    recent_comments = query_db('SELECT created_at FROM comments WHERE user_id = ? AND created_at >= ?',(user_id, last_24_hours))
+
+    recent_content = [post['created_at'] for post in recent_posts] + [comment['created_at'] for comment in recent_comments]
+    recent_content.sort()
+    if len(recent_content) > 1:
+        time_diff = [(recent_content[i] - recent_content[i-1]).total_seconds() for i in range(1, len(recent_content))]
+        avg_time_diff = sum(time_diff) / len(time_diff)
+        # if average time difference less than 1 minute, increase risk score by 2
+        if avg_time_diff < 60:
+            content_risk_score += 2.0
+
+
+
+    if content_risk_score > 5.0:
+        return 5.0
+
+    return content_risk_score
+
+
 # Task 3.3
 def moderate_content(content):
     """
@@ -932,9 +1066,61 @@ def moderate_content(content):
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
 
-    moderated_content = content
+    original_content = content
     score = 0
-    
+    DEF_CONTENT_CENSOR_MSG_TIER1 = '[content removed due to severe violation]'
+    DEF_CONTENT_CENSOR_MSG_TIER2 = '[content removed due to spam/scam policy]'
+    PERSONAL_INFO_REMOVED_MSG = '[personal information removed]'
+    LINK_REMOVED_MSG = '[link removed]'
+
+    # Rule 1.1.1: Check for Tier 1 words
+    TIER1_PATTERN = r'\b(' + '|'.join(TIER1_WORDS) + r')\b'
+    if re.search(TIER1_PATTERN, original_content, flags=re.IGNORECASE):
+        score = 5.0
+        return DEF_CONTENT_CENSOR_MSG_TIER1, score
+
+    # Rule 1.1.2: Check for Tier 2 phrases
+    TIER2_PATTERN = r'\b(' + '|'.join(re.escape(phrase) for phrase in TIER2_PHRASES) + r')\b'
+    if re.search(TIER2_PATTERN, original_content, flags=re.IGNORECASE):
+        score = 5.0
+        return DEF_CONTENT_CENSOR_MSG_TIER2, score
+
+    #Stage 2
+
+    #Rule 1.2.3: Check for excessive capitalization
+    #If content has >15 alphabetic characters and >70% are uppercase, the Content Score is incremented by a fixed value of +0.5. The content is not modified.
+    alpha_chars = re.findall(r'[A-Za-z]', original_content)
+    if len(alpha_chars) > 15:
+        uppercase_chars = [c for c in alpha_chars if c.isupper()]
+        if (len(uppercase_chars) / len(alpha_chars)) * 100 > 70:
+            score += 0.5
+
+    # Rule 1.2.1: Check for Tier 3 words
+    # Define a regex pattern that matches any whole word in the content that is on the tier 3 list
+    TIER3_PATTERN = r'\b(' + '|'.join(TIER3_WORDS) + r')\b'
+    # Run the regex to find all the matching words
+    matches = re.findall(TIER3_PATTERN, original_content, flags=re.IGNORECASE)
+    # 2 points for each match as per rule 1.2.1
+    score = len(matches) * 2
+    # Using the same regex, we replace all words with *
+    moderated_content = re.sub(TIER3_PATTERN, lambda m: '*' * len(m.group(0)), original_content, flags=re.IGNORECASE)
+
+    # Rule 1.2.2: Check for external links
+    URL_PATTERN = r'\b(?:https?://|www\.)?(?:[a-zA-Z0-9-]+(?:\.|\[\.\]))+[a-zA-Z]{2,}(?:/[^\s]*)?'
+    url_matches = re.findall(URL_PATTERN, moderated_content, flags=re.IGNORECASE)
+    score += len(url_matches) * 2
+    moderated_content = re.sub(URL_PATTERN, LINK_REMOVED_MSG, moderated_content, flags=re.IGNORECASE)
+
+
+    # Find and replace phone numbers which are personal info
+    PHONE_PATTERN = r'\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'
+
+    phone_matches = re.findall(PHONE_PATTERN, moderated_content)
+    score += len(phone_matches) * 2.0
+    # Replace phone numbers
+    moderated_content = re.sub(PHONE_PATTERN, PERSONAL_INFO_REMOVED_MSG, moderated_content)
+
+    # Return the updated content string and the score
     return moderated_content, score
 
 
