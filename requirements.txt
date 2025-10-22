@@ -1,2 +1,4 @@
+nltk
+gensim
 flask
 cryptography
