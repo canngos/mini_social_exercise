@@ -10,15 +10,109 @@
 <div class="col-md-8 mx-auto mb-4">
   <div class="card shadow-sm">
     <div class="card-body">
-      <h5 class="card-title">Create a new post</h5>
-      <form action="{{ url_for('add_post') }}" method="POST">
+      <h5 id="" class="card-title">Create a new post</h5>
+      <form id="post-form" action="{{ url_for('add_post') }}" method="POST">
         <div class="mb-3">
-          <textarea class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username') }}?" required></textarea>
+          <textarea id="post-content" class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username') }}?" required></textarea>
         </div>
-        <button type="submit" class="btn btn-primary float-end">Post</button>
+
+        <div id="poll-options-container" class="mb-3" style="display: none;">
+          <label class="form-label">Poll Options</label>
+          <div id="poll-options-list">
+            <input type="text" class="form-control mb-2" name="poll_options" placeholder="Option 1">
+            <input type="text" class="form-control mb-2" name="poll_options" placeholder="Option 2">
+          </div>
+          <button type="button" id="add-option-btn" class="btn btn-sm btn-secondary mt-1">+ Add Option</button>
+          <button type="button" id="rm-option-btn" class="btn btn-sm btn-danger mt-1">- Remove Option</button>
+        </div>
+
+        <div class="d-flex justify-content-end">
+          <button type="button" id="toggle-poll-btn" class="btn btn-secondary me-2">Create Poll</button>
+          <button type="submit" id="submit-btn" class="btn btn-primary float-end">Post</button>
+        </div>
       </form>
     </div>
   </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+
+    const togglePollBtn = document.getElementById('toggle-poll-btn');
+    const pollContainer = document.getElementById('poll-options-container');
+    const pollOptionsList = document.getElementById('poll-options-list');
+    const addOptionBtn = document.getElementById('add-option-btn');
+    const removeOptionBtn = document.getElementById('rm-option-btn');
+    const postForm = document.getElementById('post-form');
+    const postContent = document.getElementById('post-content');
+    const submitBtn = document.getElementById('submit-btn');
+
+    const postAction = "{{ url_for('add_post') }}";
+    const pollAction = "{{ url_for('add_poll') }}";
+    const postPlaceholder = "What's on your mind, {{ session.get('username') }}?";
+    const pollPlaceholder = "What's your poll question?";
+
+    let isPollMode = false;
+
+    if (togglePollBtn && addOptionBtn) {
+      togglePollBtn.addEventListener('click', function() {
+        isPollMode = !isPollMode;
+
+        if (isPollMode) {
+          pollContainer.style.display = 'block';
+
+          postForm.action = pollAction;
+
+          postContent.placeholder = pollPlaceholder;
+          postContent.name = 'poll_title';
+
+          pollOptionsList.querySelectorAll('input').forEach(input => {
+            input.required = true;
+          });
+
+          submitBtn.textContent = 'Post Poll';
+          togglePollBtn.textContent = 'Cancel';
+          togglePollBtn.classList.remove('btn-secondary');
+          togglePollBtn.classList.add('btn-danger');
+        } else {
+          pollContainer.style.display = 'none';
+          postForm.action = postAction;
+          postContent.placeholder = postPlaceholder;
+          postContent.name = 'content';
+
+          pollOptionsList.querySelectorAll('input').forEach(input => {
+            input.required = false;
+          });
+
+          submitBtn.textContent = 'Post';
+          togglePollBtn.textContent = 'Create Poll';
+          togglePollBtn.classList.add('btn-secondary');
+          togglePollBtn.classList.remove('btn-danger');
+        }
+      });
+
+      addOptionBtn.addEventListener('click', function() {
+        const newOption = document.createElement('input');
+        newOption.type = 'text';
+        newOption.className = 'form-control mb-2';
+        newOption.name = 'poll_options';
+        newOption.placeholder = 'Another Option';
+        newOption.required = true;
+        pollOptionsList.appendChild(newOption);
+      });
+
+      removeOptionBtn.addEventListener('click', function() {
+        const allOptions = pollOptionsList.querySelectorAll('input');
+
+        if (allOptions.length > 2) {
+            const lastOption = allOptions[allOptions.length - 1];
+            pollOptionsList.removeChild(lastOption);
+        } else {
+            alert("A poll must have at least two options.");
+        }
+      });
+    }
+  });
+  </script>
 </div>
 {% endif %}
 
@@ -75,56 +169,122 @@
         <small class="text-muted">{{ entry.post.created_at|datetimeformat }}</small>
         {% endif %}
       </div>
-      
-      <p class="mt-2">{{ entry.post.content }}</p>
 
-      <!-- Reactions Display and Add Reaction Button -->
-      <div class="d-flex align-items-center mt-2 mb-2">
-        <!-- Display existing reactions -->
-        <div class="reactions-display me-2">
-            {% if entry.reactions %}
-              {% for react in entry.reactions %}
-                {% if react.reaction_type == entry.user_reaction %}
-                  <form action="{{ url_for('unreact') }}" method="post" class="d-inline">
-                    <input type="hidden" name="post_id" value="{{ entry.post.id }}">
-                    <button type="submit" class="btn btn-light text-dark me-1" title="{{ react.reaction_type|capitalize }}">
-                      {{ reaction_emojis.get(react.reaction_type, '👍') }} {{ react.count }}
-                    </button>
-                  </form>
-                {% else %}
-                  <span class=" text-dark me-1" title="{{ react.reaction_type|capitalize }}">
-                    {{ reaction_emojis.get(react.reaction_type, '👍') }} {{ react.count }}
-                  </span>
-                {% endif %}
-              {% endfor %}
-            {% else %}
-              <span class="text-muted"> No reactions yet </span>
-            {% endif %}
-        </div>
+    <div class="mt-2">
+    {% if entry.post.is_poll %}
+    <!-- Show poll title -->
+    <h5 class="mb-3">{{ entry.post.poll_title }}</h5>
 
-        <!-- Add Reaction Dropdown Button -->
-        {% if session.get('user_id') %}
-        <div class="dropdown">
-          <button class="btn btn-sm btn-light text-dark rounded-circle m-0" type="button" id="dropdownMenuButton-{{ entry.post.id }}" data-bs-toggle="dropdown" aria-expanded="false" title="Add Reaction" >
-            +
-          </button>
-          <ul class="dropdown-menu" aria-labelledby="dropdownMenuButton-{{ entry.post.id }}">
-            {% for reaction_type in reaction_types %}
-            <li>
-              <form action="{{ url_for('add_reaction') }}" method="POST" class="d-inline">
-                <input type="hidden" name="post_id" value="{{ entry.post.id }}">
-                <input type="hidden" name="reaction" value="{{ reaction_type }}">
-                <button type="submit" class="dropdown-item">
-                  {{ reaction_emojis.get(reaction_type, '👍') }} {{ reaction_type|capitalize }}
-                </button>
-              </form>
-            </li>
-            {% endfor %}
-          </ul>
-        </div>
-        {% endif %}
+    {% set user_has_voted = entry.user_reaction and entry.user_reaction.startswith('vote_') %}
+
+    {% if user_has_voted %}
+      <!-- Already voted. Show results -->
+      <div class="list-group">
+        {% for option in entry.post.poll_options %}
+          {% set index = loop.index %}
+          {% set vote_string = 'vote_' ~ index %}
+          {% set reaction = entry.post.poll_reactions | selectattr('reaction_type', 'equalto', vote_string) | first %}
+          {% set count = reaction.count if reaction else 0 %}
+          {% set percentage = (count / entry.post.total_votes * 100) if entry.post.total_votes > 0 else 0 %}
+
+          <div class="list-group-item">
+            <div class="d-flex w-100 justify-content-between">
+              <h6 class="mb-1">
+                {% if entry.user_reaction == vote_string %}<strong>&check;</strong>{% endif %}
+                {{ option }}
+              </h6>
+              <small class="text-muted">{{ count }} votes</small>
+            </div>
+            <div class="progress" style="height: 5px;">
+              <div class="progress-bar" role="progressbar"
+                   style="width: {{ percentage }}%;"
+                   aria-valuenow="{{ percentage }}" aria-valuemin="0" aria-valuemax="100"></div>
+            </div>
+          </div>
+        {% endfor %}
       </div>
 
+      <div class="d-flex justify-content-between align-items-center mt-2">
+        <small class="text-muted">Total votes: {{ entry.post.total_votes }}</small>
+        <form action="{{ url_for('unvote') }}" method="POST" class="d-inline">
+          <input type="hidden" name="post_id" value="{{ entry.post.id }}">
+          <button type="submit" class="btn btn-secondary">Unvote</button>
+        </form>
+      </div>
+
+    {% else %}
+      <!-- User has not voted yet -->
+      <form action="{{ url_for('vote') }}" method="POST">
+        <input type="hidden" name="post_id" value="{{ entry.post.id }}">
+
+        <div class="list-group">
+          {% for option in entry.post.poll_options %}
+            {% set index = loop.index %}
+            <label class="list-group-item list-group-item-action" style="cursor: pointer;">
+              <input class="form-check-input me-2" type="radio" name="poll_vote"
+                     value="vote_{{ index }}" required>
+              {{ option }}
+            </label>
+          {% endfor %}
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-sm mt-2">Vote</button>
+      </form>
+    {% endif %}
+
+  {% endif %}
+    </div>
+
+
+      <!-- Reactions Display and Add Reaction Button -->
+      {% if not entry.post.is_poll %}
+      <p class="mt-2">{{ entry.post.content }}</p>
+        <div class="d-flex align-items-center mt-2 mb-2">
+            <!-- Display existing reactions -->
+            <div class="reactions-display me-2">
+                {% if entry.reactions %}
+                {% for react in entry.reactions %}
+                    {% if react.reaction_type == entry.user_reaction %}
+                    <form action="{{ url_for('unreact') }}" method="post" class="d-inline">
+                        <input type="hidden" name="post_id" value="{{ entry.post.id }}">
+                        <button type="submit" class="btn btn-light text-dark me-1" title="{{ react.reaction_type|capitalize }}">
+                        {{ reaction_emojis.get(react.reaction_type, '👍') }} {{ react.count }}
+                        </button>
+                    </form>
+                    {% else %}
+                    <span class=" text-dark me-1" title="{{ react.reaction_type|capitalize }}">
+                        {{ reaction_emojis.get(react.reaction_type, '👍') }} {{ react.count }}
+                    </span>
+                    {% endif %}
+                {% endfor %}
+                {% else %}
+                <span class="text-muted"> No reactions yet </span>
+                {% endif %}
+            </div>
+
+            <!-- Add Reaction Dropdown Button -->
+            {% if session.get('user_id') %}
+            <div class="dropdown">
+            <button class="btn btn-sm btn-light text-dark rounded-circle m-0" type="button" id="dropdownMenuButton-{{ entry.post.id }}" data-bs-toggle="dropdown" aria-expanded="false" title="Add Reaction" >
+                +
+            </button>
+            <ul class="dropdown-menu" aria-labelledby="dropdownMenuButton-{{ entry.post.id }}">
+                {% for reaction_type in reaction_types %}
+                <li>
+                <form action="{{ url_for('add_reaction') }}" method="POST" class="d-inline">
+                    <input type="hidden" name="post_id" value="{{ entry.post.id }}">
+                    <input type="hidden" name="reaction" value="{{ reaction_type }}">
+                    <button type="submit" class="dropdown-item">
+                    {{ reaction_emojis.get(reaction_type, '👍') }} {{ reaction_type|capitalize }}
+                    </button>
+                </form>
+                </li>
+                {% endfor %}
+            </ul>
+            </div>
+            {% endif %}
+        </div>
+      {% endif %}
 
      {% if entry.comments %}
       <hr>

@@ -22,7 +22,77 @@
         <small class="text-muted">{{ post.created_at|datetimeformat }}</small>
         {% endif %}
       </div>
-      
+
+
+      <div class="mt-2">
+    {% if post.is_poll %}
+
+    <!-- Show poll title -->
+    <h5 class="mb-3">{{ post.poll_title }}</h5>
+
+    {% set user_has_voted = user_reaction and user_reaction.startswith('vote_') %}
+
+    {% if user_has_voted %}
+      <!-- User already voted -->
+      <div class="list-group">
+        {% for option in post.poll_options %}
+          {% set index = loop.index %}
+          {% set vote_string = 'vote_' ~ index %}
+          {% set reaction = post.poll_reactions | selectattr('reaction_type', 'equalto', vote_string) | first %}
+          {% set count = reaction.count if reaction else 0 %}
+          {% set percentage = (count / post.total_votes * 100) if post.total_votes > 0 else 0 %}
+
+          <div class="list-group-item">
+            <div class="d-flex w-100 justify-content-between">
+              <h6 class="mb-1">
+                {% if user_reaction == vote_string %}<strong>&check;</strong>{% endif %}
+                {{ option }}
+              </h6>
+              <small class="text-muted">{{ count }} votes</small>
+            </div>
+            <div class="progress" style="height: 5px;">
+              <div class="progress-bar" role="progressbar"
+                   style="width: {{ percentage }}%;"
+                   aria-valuenow="{{ percentage }}" aria-valuemin="0" aria-valuemax="100"></div>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+
+      <div class="d-flex justify-content-between align-items-center mt-2">
+        <small class="text-muted">Total votes: {{ post.total_votes }}</small>
+        <form action="{{ url_for('unvote') }}" method="POST" class="d-inline">
+          <input type="hidden" name="post_id" value="{{ post.id }}">
+          <button type="submit" class="btn btn-secondary">Unvote</button>
+        </form>
+      </div>
+
+    {% else %}
+      <!-- User has not voted yet -->
+      <form action="{{ url_for('vote') }}" method="POST">
+        <input type="hidden" name="post_id" value="{{ post.id }}">
+
+        <div class="list-group">
+          {% for option in post.poll_options %}
+            {% set index = loop.index %}
+            <label class="list-group-item list-group-item-action" style="cursor: pointer;">
+              <input class="form-check-input me-2" type="radio" name="reaction"
+                     value="vote_{{ index }}" required>
+              {{ option }}
+            </label>
+          {% endfor %}
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-sm mt-2">Vote</button>
+      </form>
+    {% endif %}
+
+  {% endif %}
+    </div>
+
+
+    {% if not post.is_poll %}
+
       <p class="card-text mt-2">{{ post.content }}</p>
 
       <!-- Reactions Display and Add Reaction Button (Copied from feed.html.j2) -->
@@ -62,6 +132,9 @@
         </div>
         {% endif %}
       </div>
+
+
+    {% endif %}
 
       <hr>
 

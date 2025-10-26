@@ -177,12 +177,31 @@ def feed():
         reactions = query_db('SELECT reaction_type, COUNT(*) as count FROM reactions WHERE post_id = ? GROUP BY reaction_type', (post['id'],))
         comments_raw = query_db('SELECT c.id, c.content, c.created_at, u.username, u.id as user_id FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC', (post['id'],))
         post_dict = dict(post)
+        post_dict['is_poll'] = False
         post_dict['content'], _ = moderate_content(post_dict['content'])
         comments_moderated = []
         for comment in comments_raw:
             comment_dict = dict(comment)
             comment_dict['content'], _ = moderate_content(comment_dict['content'])
             comments_moderated.append(comment_dict)
+
+        # check if the post is a poll
+        poll_indicator = "#CREATED-POLL-DATA"
+        if poll_indicator in post_dict['content']:
+            #split by _ to get the poll data
+            poll_data_raw = post_dict['content'].split('_')[1].strip()
+            poll_parts = poll_data_raw.split('Options:')
+            poll_title = poll_parts[0].replace('Poll:', '').strip()
+            poll_options = [option.strip() for option in poll_parts[1].split(',')]
+            # get reactions for the poll
+            poll_reactions = query_db('SELECT reaction_type, COUNT(*) as count FROM reactions WHERE post_id = ? GROUP BY reaction_type', (post['id'],))
+            # reaction types correspond to options by index for example: vote1, vote2, etc.
+            post_dict['is_poll'] = True
+            post_dict['poll_title'] = poll_title
+            post_dict['poll_options'] = poll_options
+            post_dict['poll_reactions'] = poll_reactions
+            post_dict['total_votes'] = sum([r['count'] for r in poll_reactions])
+
         posts_data.append({
             'post': post_dict,
             'reactions': reactions,
@@ -203,6 +222,7 @@ def feed():
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
+    print("Adding new post...")
     """Handles creating a new post from the feed."""
     user_id = session.get('user_id')
 
@@ -226,6 +246,36 @@ def add_post():
         flash('Your post was successfully created!', 'success')
     else:
         # This will catch empty posts or posts that were fully censored
+        flash('Post cannot be empty or was fully censored.', 'warning')
+
+    # Redirect back to the main feed to see the new post
+    return redirect(url_for('feed'))
+
+@app.route('/poll/new', methods=['POST'])
+def add_poll():
+    print("Adding new poll...")
+    """Handles creating a new post from the feed."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to create a poll post.', 'danger')
+        return redirect(url_for('login'))
+
+    # Get poll title and options from the submitted form
+    poll_title = request.form.get('poll_title')
+    poll_options = request.form.getlist('poll_options')
+
+    # make a content that we can understand its a poll data
+    moderated_content = f"#CREATED-POLL-DATA_Poll: {poll_title} Options: " + ", ".join(poll_options)
+
+    if moderated_content and moderated_content.strip():
+        db = get_db()
+        db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
+                   (user_id, moderated_content))
+        db.commit()
+        flash('Your post was successfully created!', 'success')
+    else:
         flash('Post cannot be empty or was fully censored.', 'warning')
 
     # Redirect back to the main feed to see the new post
@@ -367,6 +417,35 @@ def post_detail(post_id):
     #  Moderation for the Main Post 
     # Convert the raw database row to a mutable dictionary
     post = dict(post_raw)
+    post['is_poll'] = False
+
+    # check if the post is a poll
+    poll_indicator = "#CREATED-POLL-DATA"
+    if poll_indicator in post['content']:
+        user_reaction = None
+        current_user_id = session.get('user_id')
+        reaction_check = query_db(
+            'SELECT reaction_type FROM reactions WHERE user_id = ? AND post_id = ?',
+            (current_user_id, post['id']),
+            one=True
+        )
+        if reaction_check:
+            user_reaction = reaction_check['reaction_type']
+
+        #split by _ to get the poll data
+        poll_data_raw = post['content'].split('_')[1].strip()
+        poll_parts = poll_data_raw.split('Options:')
+        poll_title = poll_parts[0].replace('Poll:', '').strip()
+        poll_options = [option.strip() for option in poll_parts[1].split(',')]
+        # get reactions for the poll
+        poll_reactions = query_db('SELECT reaction_type, COUNT(*) as count FROM reactions WHERE post_id = ? GROUP BY reaction_type', (post['id'],))
+        # reaction types correspond to options by index for example: vote1, vote2, etc.
+        post['is_poll'] = True
+        post['poll_title'] = poll_title
+        post['poll_options'] = poll_options
+        post['poll_reactions'] = poll_reactions
+        post['total_votes'] = sum([r['count'] for r in poll_reactions])
+
     # Unpack the tuple from moderate_content, we only need the moderated content string here
     moderated_post_content, _ = moderate_content(post['content'])
     post['content'] = moderated_post_content
@@ -396,6 +475,7 @@ def post_detail(post_id):
                            post=post,
                            reactions=reactions,
                            comments=comments,
+                           user_reaction=user_reaction,
                            reaction_emojis=REACTION_EMOJIS,
                            reaction_types=REACTION_TYPES)
 
@@ -579,7 +659,6 @@ def add_reaction():
 
 @app.route('/unreact', methods=['POST'])
 def unreact():
-    """Handles removing a user's reaction from a post."""
     user_id = session.get('user_id')
 
     if not user_id:
@@ -610,6 +689,68 @@ def unreact():
 
     return redirect(request.referrer or url_for('feed'))
 
+
+@app.route('/vote', methods=['POST'])
+def vote():
+    print(request.form)
+    post_id = request.form.get('post_id')
+    poll_vote = request.form.get('poll_vote')
+    user_id = session.get('user_id')
+
+    if not post_id or not poll_vote:
+        flash("Invalid request.", "danger")
+        return redirect(url_for('feed'))
+
+    # Ensure this is actually a poll vote
+    if not poll_vote.startswith("vote_"):
+        flash("Invalid vote type.", "danger")
+        return redirect(url_for('feed'))
+
+    db = get_db()
+    try:
+        # Delete any previous poll votes from this user on this post
+        db.execute('DELETE FROM reactions WHERE user_id = ? AND post_id = ? AND reaction_type LIKE "vote_%"', (user_id, post_id))
+        db.commit()
+
+        # Insert the new vote
+        db.execute("""
+            INSERT INTO reactions (user_id, post_id, reaction_type) 
+            VALUES (?, ?, ?)
+        """, (user_id, post_id, poll_vote))
+
+        flash("Your vote has been counted!", "success")
+
+    except Exception as e:
+        flash(f"An error occurred: {e}", "danger")
+
+    # Redirect back to the post
+    db.commit()
+    return redirect(request.referrer or url_for('feed'))
+
+
+@app.route('/unvote', methods=['POST'])
+def unvote():
+    post_id = request.form.get('post_id')
+    user_id = session['user_id']
+
+    if not post_id:
+        flash("Invalid request.", "danger")
+        return redirect(url_for('feed'))
+
+    # Remove the vote if it exists
+    db = get_db()
+    existing_vote = query_db(
+        'SELECT id FROM reactions WHERE post_id = ? AND user_id = ?',(post_id, user_id),
+            one=True
+        )
+    if existing_vote:
+        db.execute('DELETE FROM reactions WHERE id = ?', (existing_vote['id'],))
+        db.commit()
+
+    flash("Your vote has been removed.", "info")
+
+    # Redirect back to the post
+    return redirect(request.referrer or url_for('feed'))
 
 @app.route('/u/<int:user_id>/follow', methods=['POST'])
 def follow_user(user_id):
@@ -1123,6 +1264,19 @@ def moderate_content(content):
     # Return the updated content string and the score
     return moderated_content, score
 
+
+# Exercise 4.4
+# New idea for the web site: Polls as posts
+def poll_posts():
+    """Fetches and displays posts that are polls."""
+    polls = query_db('''
+        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        WHERE p.content LIKE '%[POLL]%'
+        ORDER BY p.created_at DESC
+    ''')
+    return render_template('polls.html.j2', polls=polls, title="Poll Posts")
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)
